@@ -120,7 +120,7 @@ CNA 개발에 요구되는 체크포인트를 만족하기 위하여 분석/설�
     
     - 수정된 모델은 모든 요구사항을 커버함.
     
-### 개인과제 모델 추가
+
 
 
 ### 비기능 요구사항에 대한 검증
@@ -132,15 +132,23 @@ CNA 개발에 요구되는 체크포인트를 만족하기 위하여 분석/설�
     - 체크아웃 및 포인트 적립 처리:  checkIn 에서 point 마이크로서비스로 포인트 적립 요청이 전달되는 과정에 있어서 point 마이크로 서비스가 별도의 배포주기를 가지기 때문에 Eventual Consistency 방식으로 트랜잭션 처리함.
     - 나머지 모든 inter-microservice 트랜잭션: 포인트 적립 상태 등 모든 이벤트에 대해 데이터 일관성의 시점이 크리티컬하지 않은 모든 경우가 대부분이라 판단, Eventual Consistency 를 기본으로 채택함.
 
+### 개인과제 모델 추가
+
+![image](https://user-images.githubusercontent.com/23253192/96823533-a8bbd080-1467-11eb-9ef3-e6134c5d14d4.JPG)
+
+- health 서비스와 point 서비스간 동기 / 비동기식 호출 추가 구현
+- Eventual Consistency 방식에 대한 SAGA 패턴 적용
+- health 서비스의 트랜잭션을 customercenter의 mypage view에서 볼 수 있도록 CQRS 적용
 
 ## 헥사고날 아키텍처 다이어그램 도출
     
-![image](https://user-images.githubusercontent.com/70302884/96579381-b9f2c900-1311-11eb-8094-72967631ee76.png)
+![image](https://user-images.githubusercontent.com/23253192/96824270-5f6c8080-1469-11eb-96b0-f4bfba641afc.JPG)
 
 
     - Chris Richardson, MSA Patterns 참고하여 Inbound adaptor와 Outbound adaptor를 구분함
     - 호출관계에서 PubSub 과 Req/Resp 를 구분함
     - 서브 도메인과 바운디드 컨텍스트의 분리:  각 팀의 KPI 별로 아래와 같이 관심 구현 스토리를 나눠가짐
+    - customercenter DB를 H2 -> hsqldb로 변경하여 폴리글랏 구현
 
 
 # 구현:
@@ -158,7 +166,11 @@ cd pay
 mvn spring-boot:run  
 
 cd customercenter
-python policy-handler.py 
+mvn spring-boot:run  
+
+
+cd health
+mvn spring-boot:run 
 ```
 
 ## DDD 의 적용
@@ -173,21 +185,39 @@ import org.springframework.beans.BeanUtils;
 import java.util.List;
 
 @Entity
-@Table(name="Earn_table")
-public class Earn {
+@Table(name="Health_table")
+public class Health {
 
     @Id
     @GeneratedValue(strategy=GenerationType.AUTO)
     private Long id;
-    private Long checkInId;
     private Long point;
     private String status;
 
     @PostPersist
     public void onPostPersist(){
-        Earned earned = new Earned();
-        BeanUtils.copyProperties(this, earned);
-        earned.publishAfterCommit();
+        Runed runed = new Runed();
+        BeanUtils.copyProperties(this, runed);
+        runed.publishAfterCommit();
+
+        //Following code causes dependency to external APIs
+        // it is NOT A GOOD PRACTICE. instead, Event-Policy mapping is recommended.
+
+        nosmoke.external.Earn earn = new nosmoke.external.Earn();
+        // mappings goes here
+        earn.setPoint(this.getPoint());
+        earn.setHealthId(this.getId());
+        HealthApplication.applicationContext.getBean(nosmoke.external.EarnService.class)
+            .healthy(earn);
+
+
+    }
+
+    @PostUpdate
+    public void onPostUpdate(){
+        Died died = new Died();
+        BeanUtils.copyProperties(this, died);
+        died.publishAfterCommit();
 
 
     }
@@ -200,13 +230,6 @@ public class Earn {
     public void setId(Long id) {
         this.id = id;
     }
-    public Long getCheckInId() {
-        return checkInId;
-    }
-
-    public void setCheckInId(Long checkInId) {
-        this.checkInId = checkInId;
-    }
     public Long getPoint() {
         return point;
     }
@@ -214,8 +237,6 @@ public class Earn {
     public void setPoint(Long point) {
         this.point = point;
     }
-
-
     public String getStatus() {
         return status;
     }
@@ -223,6 +244,7 @@ public class Earn {
     public void setStatus(String status) {
         this.status = status;
     }
+
 }
 
 ```
@@ -253,83 +275,42 @@ http http://localhost:8082/earns/1
 
 ## Saga
 
-checkIn 서비스에서 체크아웃 후 point 서비스에서 포인트적립을 Eventual Consistency 방식으로 처리했기 때문에 point 서비스에서 포인트 적립 처리가 완료되면 checkIn 서비스의 상태를 "EARNED"로 업데이트 시켜주는 SAGA 패턴을 적용하였다. 이 기능 역시 비동기 방식으로 checkIn의 PolicyHandler에 처리되도록 구현하였다.
+health 서비스에서 die 후 point 서비스에서 포인트적립을 Eventual Consistency 방식으로 처리했기 때문에 point 서비스에서 포인트 적립 처리가 완료되면 health 서비스의 상태를 "EARNED"로 업데이트 시켜주는 SAGA 패턴을 적용하였다. 이 기능 역시 비동기 방식으로 health의 PolicyHandler에 처리되도록 구현하였다.
 
 ```
-package nosmoke;
-
-import nosmoke.config.kafka.KafkaProcessor;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.cloud.stream.annotation.StreamListener;
-import org.springframework.messaging.handler.annotation.Payload;
-import org.springframework.stereotype.Service;
-
-import java.util.Optional;
-
-@Service
-public class PolicyHandler{
-    @StreamListener(KafkaProcessor.INPUT)
-    public void onStringEventListener(@Payload String eventString){
-
-    }
-
     @Autowired
-    CheckInRepository checkInRepository;
+    HealthRepository HealthRepository;
 
     @StreamListener(KafkaProcessor.INPUT)
-    public void wheneverEarned_UpdatePoint(@Payload Earned earned){
+    public void wheneverBuryed_Bury(@Payload Buryed buryed){
+
+        if(buryed.isMe()){
+
+            Optional<Health> healthOptional = HealthRepository.findById(buryed.getHealthId());
+            Health health = healthOptional.get();
+            health.setPoint(buryed.getPoint());
+            health.setStatus("EARNED");
 
 
-        if(earned.isMe()){
-
-            Optional<CheckIn> checkInOptional = checkInRepository.findById(earned.getCheckInId());
-            CheckIn checkIn = checkInOptional.get();
-            checkIn.setPoint(earned.getPoint());
-            checkIn.setSmokingAreaId(checkIn.getSmokingAreaId());
-            checkIn.setStatus("EARNED");
-
-            checkInRepository.save(checkIn);
+            HealthRepository.save(health);
         }
     }
-
-}
 
 ```
 
 ## CQRS
 
-고객관리 서비스(customercenter)의 시나리오인 체크인/포인트적립, 포인트결제에 따른 포인트차감 내역을 CQRS로 구현하었고 코드는 다음과 같다:
+고객관리 서비스(customercenter)의 시나리오인 health 서비스의 포인트 적립 내역을 CQRS로 구현하었고 코드는 다음과 같다:
 ```
-package nosmoke;
-
-import nosmoke.config.kafka.KafkaProcessor;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.cloud.stream.annotation.StreamListener;
-import org.springframework.messaging.handler.annotation.Payload;
-import org.springframework.stereotype.Service;
-
-import java.io.IOException;
-import java.util.List;
-import java.util.Optional;
-
-@Service
-public class MypageViewHandler {
-
-
-    @Autowired
-    private MypageRepository mypageRepository;
-
     @StreamListener(KafkaProcessor.INPUT)
-    public void whenCheckIned_then_CREATE_1 (@Payload CheckIned checkIned) {
+    public void whenRuned_then_CREATE_3 (@Payload Runed runed) {
         try {
-            if (checkIned.isMe()) {
+            if (runed.isMe()) {
                 // view 객체 생성
                 Mypage mypage = new Mypage();
                 // view 객체에 이벤트의 Value 를 set 함
-                mypage.setCheckInId(checkIned.getId());
-                mypage.setSmokingAreaId(checkIned.getSmokingAreaId());
+                mypage.setEarnId(runed.getId());
+                mypage.setPoint(runed.getHealth());
                 // view 레파지 토리에 save
                 mypageRepository.save(mypage);
             }
@@ -337,44 +318,6 @@ public class MypageViewHandler {
             e.printStackTrace();
         }
     }
-    @StreamListener(KafkaProcessor.INPUT)
-    public void whenPaid_then_CREATE_2 (@Payload Paid paid) {
-        try {
-            if (paid.isMe()) {
-                // view 객체 생성
-                Mypage mypage = new Mypage();
-                // view 객체에 이벤트의 Value 를 set 함
-                mypage.setDeductId(paid.getId());
-                mypage.setPoint(paid.getPoint());
-                // view 레파지 토리에 save
-                mypageRepository.save(mypage);
-            }
-        }catch (Exception e){
-            e.printStackTrace();
-        }
-    }
-
-
-    @StreamListener(KafkaProcessor.INPUT)
-    public void whenEarned_then_UPDATE_1(@Payload Earned earned) {
-        try {
-            if (earned.isMe()) {
-                // view 객체 조회
-                List<Mypage> mypageList = mypageRepository.findByCheckInId(earned.getCheckInId());
-                for(Mypage mypage : mypageList){
-                    // view 객체에 이벤트의 eventDirectValue 를 set 함
-                    mypage.setEarnId(earned.getId());
-                    mypage.setPoint(earned.getPoint());
-                    // view 레파지 토리에 save
-                    mypageRepository.save(mypage);
-                }
-            }
-        }catch (Exception e){
-            e.printStackTrace();
-        }
-    }
-
-}
 ```
 
 ## 동기식 호출 과 Fallback 처리
@@ -393,24 +336,26 @@ public interface DeductService {
 }
 ```
 
-- 주문을 받은 직후(@PostPersist) 결제를 요청하도록 처리
+- runed 이벤트를 실행시켜 health 어그리게이트에 데이터를 저장한 직후(@PostPersist) 포인트 적립을 요청하도록 처리
 
 ```
-    @PostPersist
+@PostPersist
     public void onPostPersist(){
-        Paid paid = new Paid();
-        BeanUtils.copyProperties(this, paid);
-        paid.publishAfterCommit();
+        Runed runed = new Runed();
+        BeanUtils.copyProperties(this, runed);
+        runed.publishAfterCommit();
 
         //Following code causes dependency to external APIs
         // it is NOT A GOOD PRACTICE. instead, Event-Policy mapping is recommended.
 
-        nosmoke.external.Deduct deduct = new nosmoke.external.Deduct();
+        nosmoke.external.Earn earn = new nosmoke.external.Earn();
         // mappings goes here
-        deduct.setPoint(this.getPoint());
-        deduct.setPayId(this.getId());
-        PayApplication.applicationContext.getBean(nosmoke.external.DeductService.class)
-            .pay(deduct);
+        earn.setPoint(this.getPoint());
+        earn.setHealthId(this.getId());
+        HealthApplication.applicationContext.getBean(nosmoke.external.EarnService.class)
+            .healthy(earn);
+
+
     }
 ```
 
@@ -420,15 +365,15 @@ public interface DeductService {
 ```
 # point 서비스를 잠시 내려놓음 (spring-boot:stop)
 
-#포인트결제 처리
-http http://localhost:8083/pays point=100    #Fail
+#health 포인트 적립 처리
+http http://localhost:8083/healths point=100    #Fail
 
 #point 서비스 재기동
 cd point
 mvn spring-boot:run
 
 #주문처리
-http http://localhost:8083/pays point=100   #Success
+http http://localhost:8083/healths point=100   #Success
 ```
 
 - 또한 과도한 요청시에 서비스 장애가 도미노 처럼 벌어질 수 있다. (서킷브레이커, 폴백 처리는 운영단계에서 설명한다.)
@@ -439,46 +384,32 @@ http http://localhost:8083/pays point=100   #Success
 ## 비동기식 호출 / 시간적 디커플링 / 장애격리 / 최종 (Eventual) 일관성 테스트
 
 
-체크아웃이 이루어진 후에 point 서비스로 이를 알려주는 행위는 동기식이 아니라 비 동기식으로 처리하여 point 서비스의 처리를 위하여 체크인/아웃이 블로킹 되지 않아도록 처리한다.
-
+died 이벤트에 의해 health 포인트 입력이 이루어진 후에 point 서비스로 이를 알려주는 행위는 동기식이 아니라 비 동기식으로 처리하여 point 서비스의 처리를 위하여 체크인/아웃이 블로킹 되지 않아도록 처리한다.
  
 ```
-    @PostPersist
-    public void onPostPersist(){
-        CheckIned checkIned = new CheckIned();
-        BeanUtils.copyProperties(this, checkIned);
-        checkIned.publishAfterCommit();
-
-
-    }
-
     @PostUpdate
     public void onPostUpdate(){
-        if(this.getStatus()==null){
-            CheckOuted checkOuted = new CheckOuted();
-            BeanUtils.copyProperties(this, checkOuted);
-            checkOuted.publishAfterCommit();
-        }
+        Died died = new Died();
+        BeanUtils.copyProperties(this, died);
+        died.publishAfterCommit();
 
 
     }
 ```
 
-- point 서비스에서는 체크아웃 이벤트에 대해서 이를 수신하여 자신의 정책을 처리하도록 PolicyHandler 를 구현한다:
+- point 서비스에서는 died 이벤트에 대해서 이를 수신하여 자신의 정책을 처리하도록 PolicyHandler 를 구현한다:
 
 ```
     @Autowired
     EarnRepository EarnRepository;
 
     @StreamListener(KafkaProcessor.INPUT)
-    public void wheneverCheckOuted_CheckOut(@Payload CheckOuted checkOuted){
+    public void wheneverDied_Death(@Payload Died died){
 
-        if(checkOuted.isMe()){
-
+        if(died.isMe()){
             Earn earn = new Earn();
-            earn.setCheckInId(checkOuted.getId());
-            earn.setPoint(checkOuted.getPoint());
-            //earn.setStatus(checkOuted.getStatus());
+            earn.setHealthId(died.getId());
+            earn.setPoint(died.getPoint());
 
             EarnRepository.save(earn);
         }
@@ -486,24 +417,23 @@ http http://localhost:8083/pays point=100   #Success
 
 ```
 
-checkIn 시스템은 포인트적립/사용과 완전히 분리되어있으며, 이벤트 수신에 따라 처리되기 때문에, point 서비스가 유지보수로 인해 잠시 내려간 상태라도 주문을 받는데 문제가 없다.
+health 서비스의 run 시스템은 포인트적립/사용과 완전히 분리되어있으며, 이벤트 수신에 따라 처리되기 때문에, point 서비스가 유지보수로 인해 잠시 내려간 상태라도 주문을 받는데 문제가 없다.
 
 ```
 # point 서비스 를 잠시 내려놓음 (ctrl+c)
 
 #체크인/아웃 처리
-http localhost:8081/checkIns smokingAreaId=1   #Success
-http PUT localhost:8081/checkIns point=200     #Success
+http http://health:8080/healths point=1   #Success
 
 #체크인 포인트 적립 상태 확인
-http localhost:8081/checkIns/1     # 포인트 적립 상태 안바뀜 확인
+http http://health:8080/healths/1     # 포인트 적립 상태 안바뀜 확인
 
 #point 서비스 기동
 cd point
 mvn spring-boot:run
 
 #체크인 포인트 적립 상태 확인
-http localhost:8081/checkIns/1     # 모든 체크인 상태가 "EARNED"로 확인
+http http://health:8080/healths/1     # 모든 체크인 상태가 "EARNED"로 확인
 ```
 
 ## Gateway를 통한 진입점 통일
@@ -532,6 +462,10 @@ spring:
           uri: http://customercenter:8080
           predicates:
             - Path= /mypages/**
+        - id: health
+          uri: http://health:8080
+          predicates:
+            - Path=/healths/** 
       globalcors:
         corsConfigurations:
           '[/**]':
@@ -554,6 +488,20 @@ http http://point:8080/earns/1  #point 서비스에 직접 진입
 
 http http://gateway:8080/earns/1  #point 서비스에 gateway를 통해 진입(결과값 같음)
 ```
+
+## 폴리글랏 적용
+
+customercenter 서비스의 pom.xml에 h2 에서 hsqldb로 dependency 변경
+
+```
+		<dependency>
+			<groupId>org.hsqldb</groupId>
+			<artifactId>hsqldb</artifactId>
+			<version>2.4.0</version>
+			<scope>runtime</scope>
+		</dependency>
+```
+
 
 # 운영
 
