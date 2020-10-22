@@ -506,10 +506,93 @@ customercenter 서비스의 pom.xml에 h2 에서 hsqldb로 dependency 변경
 # 운영
 
 ### 오토스케일 아웃
+replica 설정
 
-* kubectl autoscale deploy pay --min1 --max=10 --cpu-percent=15 -n tutorial로 오토스케일 설정을 완료하여 아래에서 설정된 것을 확인
+```
+root@labs--267312942:~# kubectl scale deploy checkin --replicas=2 -n tutorial
+deployment.apps/checkin scaled
+root@labs--267312942:~# kubectl get deploy -n tutorial
+NAME             READY   UP-TO-DATE   AVAILABLE   AGE
+checkin          2/2     2            2           51m
+customercenter   1/1     1            1           51m
+gateway          1/1     1            1           51m
+health           1/1     1            1           52m
+pay              1/1     1            1           51m
+point            1/1     1            1           51m
+```
 
-![image](https://user-images.githubusercontent.com/16397080/96666748-bce1ce00-1392-11eb-8cc9-9e4745e344c0.png)
+
+* 오토스케일 적용
+
+```
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pay
+  namespace: tutorial
+  labels:
+    app: pay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pay
+  template:
+    metadata:
+      labels:
+        app: pay
+    spec:
+      containers:
+        - name: pay
+          image: 879772956301.dkr.ecr.ap-northeast-2.amazonaws.com/skccuser23-pay:v1
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              cpu: 500m
+            requests:
+              cpu: 200m
+EOF
+```
+
+* kubectl autoscale deploy pay --min=1 --max=10 --cpu-percent=15 -n tutorial로 오토스케일 설정을 완료하여 아래에서 설정된 것을 확인
+```
+NAME                                          REFERENCE            TARGETS         MINPODS   MAXPODS   REPLICAS   AGE
+horizontalpodautoscaler.autoscaling/checkin   Deployment/checkin   <unknown>/15%   1         10        2          30s
+```
+
+
+### 서킷브레이커
+
+
+* 서킷브레이커 적용
+
+```
+kubectl apply -f - <<EOF
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: checkin
+  namespace: tutorial
+spec:
+  host: checkin
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 2
+      http:
+        http1MaxPendingRequests: 1
+        maxRequestsPerConnection: 1
+    outlierDetection:
+      consecutiveErrors: 5
+      interval: 1s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 100
+EOF
+```
+
+siege -c2 -t30S  -v --content-type "application/json" 'http://checkin:8080/checkIns POST {"smokingAreaId":1}'
 
 
 ## Istio 적용
